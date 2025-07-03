@@ -109,7 +109,7 @@ class ChatTUI:
         controls.append("r: refresh")
         controls.append("w: write")
         if self.channel:
-            controls.append("c: clear channel")
+            controls.append("c: leave channel")
         else:
             controls.append("c: set channel")
         controls.append("q: quit")
