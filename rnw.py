@@ -1,172 +1,254 @@
+#!/usr/bin/env python3
+import os
 import sys
-import argparse
-from textwrap import wrap
-import readline  # 用于改进命令行输入体验
-from core import write, read_new
+import shutil
+import textwrap
+from typing import List, Dict, Optional
+from core import readlist, write
 
-# 模拟数据存储
-data_store = {
-    "technology": {
-        "new": [f"新科技动态{i}: 人工智能在医疗领域的突破性应用，详细分析请参考..." + "a"*(200+i) for i in range(1, 26)],
-        "hot": [f"热门技术话题{i}: 量子计算最新进展与未来展望" + "b"*(250+i) for i in range(1, 21)]
-    },
-    "design": {
-        "new": [f"设计趋势{i}: 极简主义在UI设计中的新表现" + "c"*(240+i) for i in range(1, 18)],
-        "hot": [f"经典设计案例{i}: 苹果产品设计哲学深度解析" + "d"*(260+i) for i in range(1, 15)]
-    }
-}
-
-
-
-def read_hot(channel=None, pageNo=1, pageSize=10):
-    """获取热门内容"""
-    return read_data('hot', channel, pageNo, pageSize)
-
-def read_data(content_type, channel, page, page_size):
-    """通用数据读取函数"""
-    start = (page - 1) * page_size
-    end = start + page_size
-    
-    if channel and channel in data_store:
-        return data_store[channel][content_type][start:end]
-    
-    # 合并所有频道的数据
-    all_items = []
-    for ch in data_store.values():
-        all_items.extend(ch[content_type])
-    return all_items[start:end]
-
-# CLI展示功能
-class RNWReader:
+class ChatTUI:
     def __init__(self):
-        self.channel = None
-        self.content_type = 'new'
-        self.page = 1
-        self.page_size = 10
-    
-    def display_header(self):
-        """显示当前阅读状态头部信息"""
-        channel_display = self.channel or "所有频道"
-        print(f"\n\033[1;36m=== {channel_display.upper()} - {self.content_type.upper()} 内容 (第{self.page}页) ===\033[0m")
-        print("\033[90m" + "=" * 60 + "\033[0m")
-    
-    def display_item(self, idx, content):
-        """格式化显示单个内容项"""
-        wrapped = wrap(content, width=58)
-        color = "\033[1;33m" if "热门" in content else "\033[0;32m"
+        self.channel: Optional[str] = None
+        self.page_size = 20
+        self.current_page = 1
+        self.posts: List[Dict] = []
+        self.terminal_width = shutil.get_terminal_size().columns
+        self.terminal_height = shutil.get_terminal_size().lines
         
-        print(f"\033[1;35m{idx:>2}.\033[0m {color}{wrapped[0]}\033[0m")
-        for line in wrapped[1:]:
-            print(f"    {line}")
-        print("\033[90m" + "-" * 60 + "\033[0m")
-    
-    def display_pagination(self, total_pages):
-        """显示分页信息"""
-        page_info = f"页码: {self.page}/{total_pages}"
-        print(f"\033[1;34m{page_info:^60}\033[0m")
-    
-    def display_help(self):
-        """显示帮助信息"""
-        print("\n\033[1m命令选项:\033[0m")
-        print("  [n] 下一页      [p] 上一页      [c] 切换频道")
-        print("  [s] 切换排序    [q] 退出        [数字] 跳转页码")
-        print("  [h] 帮助")
-    
-    def run(self):
-        """主交互循环"""
-        while True:
-            # 获取当前页数据
-            if self.content_type == 'new':
-                items = read_new(self.channel, self.page, self.page_size)
+    def clear_screen(self):
+        os.system('clear' if os.name == 'posix' else 'cls')
+        
+    def get_terminal_size(self):
+        """响应式获取终端尺寸"""
+        size = shutil.get_terminal_size()
+        self.terminal_width = size.columns
+        self.terminal_height = size.lines
+        
+    def render_header(self):
+        """渲染极简头部"""
+        self.get_terminal_size()
+        
+        # 频道显示
+        channel_text = f"#{self.channel}" if self.channel else "All Messages"
+        
+        # 居中显示
+        header_line = f"  {channel_text}  "
+        padding = (self.terminal_width - len(header_line)) // 2
+        
+        print(" " * padding + header_line)
+        print("─" * self.terminal_width)
+        print()
+        
+    def wrap_content(self, content: str, max_width: int) -> List[str]:
+        """智能文本换行，保持阅读舒适度"""
+        if not content:
+            return [""]
+            
+        # 移除多余空白
+        content = ' '.join(content.split())
+        
+        # 使用textwrap进行优雅换行
+        wrapped = textwrap.fill(content, width=max_width, 
+                              break_long_words=False, 
+                              break_on_hyphens=False)
+        return wrapped.split('\n')
+        
+    def render_post(self, post: Dict, index: int):
+        """渲染单个聊天消息"""
+        name = post.get('name', 'Anonymous')
+        content = post.get('content', '')
+        
+        # 计算可用宽度 (留出边距)
+        available_width = self.terminal_width - 4
+        
+        # 用户名最大宽度
+        max_name_width = min(20, available_width // 3)
+        if len(name) > max_name_width:
+            name = name[:max_name_width-1] + "…"
+            
+        # 内容区域宽度
+        content_width = available_width - len(name) - 3  # 3 for spacing
+        
+        # 换行处理
+        content_lines = self.wrap_content(content, content_width)
+        
+        # 渲染第一行
+        first_line = content_lines[0] if content_lines else ""
+        print(f"  {name:<{len(name)}}   {first_line}")
+        
+        # 渲染剩余行
+        for line in content_lines[1:]:
+            print(f"  {' ' * len(name)}   {line}")
+            
+        # 添加微妙的分隔
+        print()
+        
+    def render_posts(self):
+        """渲染聊天列表"""
+        if not self.posts:
+            # 空状态
+            empty_text = "No messages yet"
+            padding = (self.terminal_width - len(empty_text)) // 2
+            print("\n" * (self.terminal_height // 3))
+            print(" " * padding + empty_text)
+            print("\n" * (self.terminal_height // 3))
+            return
+            
+        # 计算可显示的消息数量
+        available_height = self.terminal_height - 6  # 头部、底部、缓冲区
+        
+        for i, post in enumerate(self.posts[:available_height]):
+            self.render_post(post, i)
+            
+    def render_footer(self):
+        """渲染底部控制区"""
+        print("─" * self.terminal_width)
+        
+        # 控制提示
+        controls = []
+        controls.append("r: refresh")
+        controls.append("w: write")
+        if self.channel:
+            controls.append("c: clear channel")
+        else:
+            controls.append("c: set channel")
+        controls.append("q: quit")
+        
+        control_text = "  " + " • ".join(controls) + "  "
+        
+        # 分页信息
+        if self.posts:
+            page_info = f"  page {self.current_page}  "
+            # 右对齐页码信息
+            spaces_needed = max(0, self.terminal_width - len(control_text) - len(page_info))
+            footer_line = control_text + " " * spaces_needed + page_info
+        else:
+            footer_line = control_text
+            
+        print(footer_line[:self.terminal_width])
+        
+    def render(self):
+        """渲染完整界面"""
+        self.clear_screen()
+        self.render_header()
+        self.render_posts()
+        self.render_footer()
+        
+    def load_posts(self):
+        """加载聊天数据"""
+        try:
+            self.posts = readlist(self.channel, self.current_page, self.page_size)
+        except Exception as e:
+            self.posts = []
+            print(f"Error loading posts: {e}")
+            
+    def handle_input(self, key: str):
+        """处理用户输入"""
+        key = key.lower().strip()
+        
+        if key == 'q':
+            return False
+            
+        elif key == 'r':
+            self.load_posts()
+            
+        elif key == 'w':
+            self.write_message()
+            
+        elif key == 'c':
+            if self.channel:
+                self.channel = None
+                self.current_page = 1
             else:
-                items = read_hot(self.channel, self.page, self.page_size)
+                self.set_channel()
+            self.load_posts()
             
-            # 计算总页数
-            total_items = sum(len(v[self.content_type]) for v in data_store.values())
-            total_pages = max(1, (total_items + self.page_size - 1) // self.page_size)
+        elif key == 'n' and self.posts:
+            self.current_page += 1
+            self.load_posts()
             
-            # 清屏并显示内容
-            print("\033c", end="")  # 清屏
-            self.display_header()
+        elif key == 'p' and self.current_page > 1:
+            self.current_page -= 1
+            self.load_posts()
             
-            if not items:
-                print("\033[1;31m没有找到内容\033[0m")
-            else:
-                for i, item in enumerate(items, 1):
-                    self.display_item(i, item)
-            
-            self.display_pagination(total_pages)
-            self.display_help()
-            
-            # 获取用户输入
-            try:
-                cmd = input("\n> ").strip().lower()
-            except EOFError:
-                print("\n退出")
-                break
-            
-            # 处理命令
-            if cmd == 'q':
-                print("退出阅读模式")
-                break
-            elif cmd == 'n':
-                self.page = min(total_pages, self.page + 1)
-            elif cmd == 'p':
-                self.page = max(1, self.page - 1)
-            elif cmd == 'c':
-                self.select_channel()
-            elif cmd == 's':
-                self.toggle_sort()
-            elif cmd.isdigit():
-                page_num = int(cmd)
-                if 1 <= page_num <= total_pages:
-                    self.page = page_num
-            elif cmd == 'h':
-                continue  # 帮助信息已经显示
-
-    def select_channel(self):
-        """选择频道"""
-        print("\n可用频道:")
-        channels = ["所有频道"] + list(data_store.keys())
-        for i, ch in enumerate(channels, 1):
-            print(f"  {i}. {ch}")
+        return True
+        
+    def write_message(self):
+        """写入新消息"""
+        print("\n" + "─" * self.terminal_width)
+        print("Write a message (press Enter twice to send, Ctrl+C to cancel):")
+        print()
+        
+        lines = []
+        empty_lines = 0
         
         try:
-            choice = int(input("选择频道编号: "))
-            if 1 <= choice <= len(channels):
-                self.channel = channels[choice-1] if choice > 1 else None
-                self.page = 1  # 重置页码
-        except ValueError:
-            print("无效输入")
-
-    def toggle_sort(self):
-        """切换内容排序方式"""
-        self.content_type = 'hot' if self.content_type == 'new' else 'new'
-        self.page = 1  # 重置页码
-        print(f"已切换到 {'热门' if self.content_type == 'hot' else '最新'} 内容")
-
-# 主程序
-def main():
-    parser = argparse.ArgumentParser(description='RNW - 阅读与写作工具')
-    parser.add_argument('content', nargs='*', help='要保存的内容')
-    parser.add_argument('-c', '--channel', help='指定内容频道')
-    
-    args = parser.parse_args()
-    
-    if args.content:
-        # 写模式
-        content = " ".join(args.content)
-        if len(content) > 280:
-            print("错误: 内容超过280字符限制")
-            return
+            while True:
+                line = input()
+                if line == "":
+                    empty_lines += 1
+                    if empty_lines >= 2:
+                        break
+                else:
+                    empty_lines = 0
+                lines.append(line)
+                
+            content = '\n'.join(lines).strip()
+            if content:
+                write(content, self.channel)
+                print(f"\nMessage sent to {f'#{self.channel}' if self.channel else 'global'}")
+                input("Press Enter to continue...")
+                self.load_posts()
+                
+        except KeyboardInterrupt:
+            print("\nCancelled")
+            input("Press Enter to continue...")
+            
+    def set_channel(self):
+        """设置频道"""
+        print("\n" + "─" * self.terminal_width)
+        try:
+            channel = input("Enter channel name (or press Enter for global): ").strip()
+            if channel:
+                self.channel = channel
+                self.current_page = 1
+                print(f"Switched to #{channel}")
+            else:
+                self.channel = None
+                self.current_page = 1
+                print("Switched to global")
+            input("Press Enter to continue...")
+        except KeyboardInterrupt:
+            pass
+            
+    def run(self):
+        """主循环"""
+        print("Loading...")
+        self.load_posts()
         
-        write(content)
-        print(f"已保存内容: {content[:50]}...")
-    else:
-        # 读模式
-        print("进入阅读模式...")
-        reader = RNWReader()
-        reader.run()
+        while True:
+            self.render()
+            try:
+                key = input("\n> ").strip()
+                if not self.handle_input(key):
+                    break
+            except KeyboardInterrupt:
+                break
+            except EOFError:
+                break
+                
+        print("\nGoodbye!")
+
+def main():
+    """启动TUI"""
+    try:
+        tui = ChatTUI()
+        tui.run()
+    except KeyboardInterrupt:
+        print("\nGoodbye!")
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

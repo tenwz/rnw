@@ -86,8 +86,8 @@ def readlist(channel: Optional[str], pageNo: int = 1, pageSize: int = 10):
 
 # 使用示例
 if __name__ == "__main__":
-    write("testfortest","test")
-    news = readlist("test",1,10)
+    write("HelloWord")
+    news = readlist(pageNo=1,pageSize=10)
     for item in news:
         print(f"{item['name']}: {item['content']}")
         print("-" * 50)
