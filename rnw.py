@@ -3,8 +3,10 @@ import os
 import sys
 import shutil
 import textwrap
-from typing import List, Dict, Optional
-from core import readlist, write
+import threading
+import time
+from typing import List, Dict, Optional, Generator
+from core import readlist_stream, write
 
 class ChatTUI:
     def __init__(self):
@@ -14,6 +16,9 @@ class ChatTUI:
         self.posts: List[Dict] = []
         self.terminal_width = shutil.get_terminal_size().columns
         self.terminal_height = shutil.get_terminal_size().lines
+        self.loading = False
+        self.loading_dots = 0
+        self.stream_complete = False
         
     def clear_screen(self):
         os.system('clear' if os.name == 'posix' else 'cls')
@@ -30,6 +35,11 @@ class ChatTUI:
         
         # 频道显示
         channel_text = f"#{self.channel}" if self.channel else "All Messages"
+        
+        # 添加加载指示器
+        if self.loading:
+            loading_indicator = "⚡ " + "." * (self.loading_dots % 4)
+            channel_text += f" {loading_indicator}"
         
         # 居中显示
         header_line = f"  {channel_text}  "
@@ -85,7 +95,7 @@ class ChatTUI:
         
     def render_posts(self):
         """渲染聊天列表"""
-        if not self.posts:
+        if not self.posts and not self.loading:
             # 空状态
             empty_text = "No messages yet"
             padding = (self.terminal_width - len(empty_text)) // 2
@@ -100,6 +110,11 @@ class ChatTUI:
         for i, post in enumerate(self.posts[:available_height]):
             self.render_post(post, i)
             
+        # 如果还在加载，显示加载提示
+        if self.loading and len(self.posts) > 0:
+            print(f"  📡 Loading more messages{'.' * (self.loading_dots % 4)}")
+            print()
+            
     def render_footer(self):
         """渲染底部控制区"""
         print("─" * self.terminal_width)
@@ -109,22 +124,24 @@ class ChatTUI:
         controls.append("r: refresh")
         controls.append("w: write")
         if self.channel:
-            controls.append("c: leave channel")
+            controls.append("c: clear channel")
         else:
             controls.append("c: set channel")
         controls.append("q: quit")
         
         control_text = "  " + " • ".join(controls) + "  "
         
-        # 分页信息
-        if self.posts:
-            page_info = f"  page {self.current_page}  "
-            # 右对齐页码信息
-            spaces_needed = max(0, self.terminal_width - len(control_text) - len(page_info))
-            footer_line = control_text + " " * spaces_needed + page_info
-        else:
-            footer_line = control_text
+        # 状态信息
+        status_info = ""
+        if self.loading:
+            status_info = f"  Loading...  "
+        elif self.posts:
+            status_info = f"  {len(self.posts)} messages  "
             
+        # 右对齐状态信息
+        spaces_needed = max(0, self.terminal_width - len(control_text) - len(status_info))
+        footer_line = control_text + " " * spaces_needed + status_info
+        
         print(footer_line[:self.terminal_width])
         
     def render(self):
@@ -134,13 +151,36 @@ class ChatTUI:
         self.render_posts()
         self.render_footer()
         
-    def load_posts(self):
-        """加载聊天数据"""
-        try:
-            self.posts = readlist(self.channel, self.current_page, self.page_size)
-        except Exception as e:
-            self.posts = []
-            print(f"Error loading posts: {e}")
+    def load_posts_stream(self):
+        """流式加载聊天数据"""
+        self.loading = True
+        self.posts = []
+        self.stream_complete = False
+        
+        def stream_worker():
+            try:
+                for post in readlist_stream(self.channel, self.current_page, self.page_size):
+                    self.posts.append(post)
+                    # 实时更新界面
+                    self.render()
+                    time.sleep(0.1)  # 给用户一些视觉反馈
+                    
+                self.stream_complete = True
+            except Exception as e:
+                print(f"Error loading posts: {e}")
+            finally:
+                self.loading = False
+                self.render()
+                
+        # 启动后台线程加载数据
+        thread = threading.Thread(target=stream_worker)
+        thread.daemon = True
+        thread.start()
+        
+    def update_loading_animation(self):
+        """更新加载动画"""
+        if self.loading:
+            self.loading_dots += 1
             
     def handle_input(self, key: str):
         """处理用户输入"""
@@ -150,7 +190,7 @@ class ChatTUI:
             return False
             
         elif key == 'r':
-            self.load_posts()
+            self.load_posts_stream()
             
         elif key == 'w':
             self.write_message()
@@ -161,22 +201,25 @@ class ChatTUI:
                 self.current_page = 1
             else:
                 self.set_channel()
-            self.load_posts()
+            self.load_posts_stream()
             
-        elif key == 'n' and self.posts:
+        elif key == 'n' and self.stream_complete:
             self.current_page += 1
-            self.load_posts()
+            self.load_posts_stream()
             
         elif key == 'p' and self.current_page > 1:
             self.current_page -= 1
-            self.load_posts()
+            self.load_posts_stream()
             
         return True
         
     def write_message(self):
         """写入新消息"""
-        print("\n" + "─" * self.terminal_width)
-        print("Write a message (press Enter twice to send, Ctrl+C to cancel):")
+        self.clear_screen()
+        print("✍️  Write a message")
+        print("─" * self.terminal_width)
+        print()
+        print("💡 Tip: Press Enter twice to send, Ctrl+C to cancel")
         print()
         
         lines = []
@@ -184,60 +227,105 @@ class ChatTUI:
         
         try:
             while True:
-                line = input()
+                line = input("📝 ")
                 if line == "":
                     empty_lines += 1
                     if empty_lines >= 2:
-                        break
+                        if lines:  # 有内容才发送
+                            print("\n✨ Sending message...")
+                            break
+                        else:
+                            print("💭 Empty message, try again or press Ctrl+C to cancel")
+                            empty_lines = 0
                 else:
                     empty_lines = 0
+                    if not lines:  # 第一行输入后给个鼓励
+                        print("👍 Great! Continue typing, press Enter twice when done...")
                 lines.append(line)
                 
             content = '\n'.join(lines).strip()
             if content:
                 write(content, self.channel)
-                print(f"\nMessage sent to {f'#{self.channel}' if self.channel else 'global'}")
-                input("Press Enter to continue...")
-                self.load_posts()
+                print(f"✅ Message sent to {f'#{self.channel}' if self.channel else 'global'}")
+                print("\n🔄 Refreshing messages...")
+                time.sleep(1)
+                self.load_posts_stream()
+                return
                 
         except KeyboardInterrupt:
-            print("\nCancelled")
-            input("Press Enter to continue...")
+            print("\n❌ Message cancelled")
+            
+        input("\n👈 Press Enter to continue...")
             
     def set_channel(self):
         """设置频道"""
-        print("\n" + "─" * self.terminal_width)
+        self.clear_screen()
+        print("🏷️  Set Channel")
+        print("─" * self.terminal_width)
+        print()
+        
         try:
-            channel = input("Enter channel name (or press Enter for global): ").strip()
+            channel = input("📺 Enter channel name (or press Enter for global): ").strip()
             if channel:
                 self.channel = channel
                 self.current_page = 1
-                print(f"Switched to #{channel}")
+                print(f"✅ Switched to #{channel}")
             else:
                 self.channel = None
                 self.current_page = 1
-                print("Switched to global")
-            input("Press Enter to continue...")
+                print("✅ Switched to global")
+                
+            print("🔄 Loading messages...")
+            time.sleep(1)
+            
         except KeyboardInterrupt:
-            pass
+            print("\n❌ Cancelled")
+            input("\n👈 Press Enter to continue...")
             
     def run(self):
         """主循环"""
-        print("Loading...")
-        self.load_posts()
+        # 直接进入界面，不等待加载
+        self.render()
+        
+        # 启动流式加载
+        self.load_posts_stream()
         
         while True:
-            self.render()
+            # 更新加载动画
+            self.update_loading_animation()
+            
+            # 如果正在加载，定期刷新界面
+            if self.loading:
+                self.render()
+                
             try:
-                key = input("\n> ").strip()
-                if not self.handle_input(key):
-                    break
+                # 非阻塞输入处理
+                import select
+                import sys
+                
+                # 检查是否有输入
+                if select.select([sys.stdin], [], [], 0.5)[0]:
+                    key = input("\n🎯 Command: ").strip()
+                    if not self.handle_input(key):
+                        break
+                        
             except KeyboardInterrupt:
                 break
             except EOFError:
                 break
+            except ImportError:
+                # Windows系统不支持select，使用阻塞输入
+                try:
+                    key = input("\n🎯 Command: ").strip()
+                    if not self.handle_input(key):
+                        break
+                except KeyboardInterrupt:
+                    break
+                except EOFError:
+                    break
                 
-        print("\nGoodbye!")
+        self.clear_screen()
+        print("👋 Thanks for using the chat! Goodbye!")
 
 def main():
     """启动TUI"""
@@ -245,9 +333,9 @@ def main():
         tui = ChatTUI()
         tui.run()
     except KeyboardInterrupt:
-        print("\nGoodbye!")
+        print("\n👋 Goodbye!")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"💥 Error: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
